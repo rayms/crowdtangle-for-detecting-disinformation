@@ -1,0 +1,121 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+library(tidyverse) #package for data wrangling and more 
+library(janitor) #package for cleaning data
+library(lubridate) #package for dealing with time and dates
+library(widyr) # package for processing data for co-occurrences and correlation
+library(ggraph) #packages for network analysis
+library(igraph)
+library(tidygraph)
+
+```
+
+#Load and process data
+```{r}
+pro_trump <- read_csv("pro-trump-data.csv", na = c("NA", "", "N/A"), col_types = c("cccdccdddddddddcdddccccccccccc"))
+
+pro_trump <- clean_names(pro_trump)
+
+pro_trump <- pro_trump %>%
+  mutate(total_interactions = str_replace_all(total_interactions, ",", ""),
+         total_interactions = as.numeric(total_interactions),
+         created = as_datetime(created)) %>%
+  select(-total_interactions_weighted_likes_1x_shares_1x_comments_1x_love_1x_wow_1x_haha_1x_sad_1x_angry_1x)
+```
+
+## Let's examine the data
+```{r}
+glimpse(pro_trump)
+```
+
+## In which groups are the members most active?
+```{r}
+count(pro_trump, group_name, sort = TRUE) %>%
+  View
+```
+
+## Which links are being shared the most often? 
+```{r}
+count(pro_trump, link, sort = TRUE) %>%
+  View
+
+```
+
+## Are there duplicate messages appearing in the groups? 
+```{r}
+count(pro_trump, message, sort = TRUE) %>%
+  View
+```
+
+## How can we visualize the sharing of these messages and links? 
+The code below does two things: first, it filters the data to contain only those rows where the _message_ column contains the string, "Federal Judge Releases Benghazi Evidence,"; and second, it plots the date and time of the post on the x-axis and the name of the group where the post appeared on the y-axis. Finally, we add an aesthetic (geom_point) to display these posts as points on the graph.
+
+```{r}
+pro_trump %>%
+  filter(str_detect(message, "Federal Judge Releases Benghazi Evidence")) %>%
+  ggplot(aes(x = created, y = group_name)) +
+  geom_point()
+```
+
+
+## Which groups often share the same content from elsewhere on Facebook? How can we visualize these relationships in a network chart?
+To conduct this analysis, we need to filter the data to exclude any links outside of Facebook, extract the pages or groups shared in the link, and then account for other types of content, such as the links of private individuals. 
+```{r}
+#filter the data to select only links that come from facebook.com and create a new dataframe
+trump_facebook <- pro_trump %>%
+  filter(str_detect(link, "facebook.com"))
+
+#create a new variable that contains the name of the shared page
+trump_facebook <- trump_facebook %>%
+    mutate(shared_page = str_match(link, "://(.*?)/(.*?)/")[,3])
+
+#extract group IDs where there is no shared page available, e.g., when the link is to the page of a private individual 
+trump_facebook <- trump_facebook %>%
+  mutate(shared_page = case_when(
+    is.na(shared_page) ~ str_extract(link,"[0-9]+"),
+    TRUE ~ shared_page
+  ))
+
+```
+
+
+## Computing the pairwise correlation between pairs of pages and the content they share
+```{r, message = FALSE, echo = FALSE}
+#we select only the data that we need
+trump_facebook_network <- trump_facebook %>%
+  select(shared_page, group_name)
+
+#we count the number of occurrences of each group in the data
+group_counts <- trump_facebook_network %>%
+  count(group_name) %>%
+  arrange(desc(n))
+
+#we compute the pairwise correlation, using the pairwise_cor function, to find pairs of groups which tend to share similar content
+group_correlations <- trump_facebook_network %>%
+  semi_join(group_counts) %>%
+  pairwise_cor(group_name, shared_page, sort = TRUE, upper = FALSE)
+```
+
+## Visualizing this relationship in a network graph
+```{r, echo = FALSE, message = FALSE, fig.width = 12, fig.height= 10}
+set.seed(2019)
+
+group_correlations %>%
+  filter(correlation >= .1) %>%
+  as_tbl_graph(vertices = group_counts) %>%
+  mutate(community = as.factor(group_infomap()),
+         degree = centrality_degree(mode = "in")) %>%
+ggraph(layout = 'fr') +
+  geom_edge_link(aes(alpha = correlation), color = "gray", show.legend = FALSE) +
+  geom_node_point(aes(color = community, size = degree), show.legend = FALSE) +
+  geom_node_text(aes(label = name), check_overlap = TRUE) +
+  theme_void()
+````
+
+
